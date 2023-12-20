@@ -16,5 +16,9 @@ endif ()
 add_executable(example example.cpp)
 target_link_libraries(example la_vector)
 
-enable_testing()
-add_subdirectory(test)
+option(LA_VECTOR_ENABLE_TESING, off)
+
+if (LA_VECTOR_ENABLE_TESING)
+  enable_testing()
+  add_subdirectory(test)
+endif()
