@@ -56,6 +56,26 @@ TEMPLATE_TEST_CASE_SIG("Rank", "", TEMPLATE_ARGS) {
         REQUIRE(ef_rank(q) == v.rank(q));
 }
 
+
+TEMPLATE_TEST_CASE_SIG("Append", "", TEMPLATE_ARGS) {
+  if constexpr (B > 0) {
+    auto data = generate_unique<T>(100000);
+
+    la_vector<T, B> v(data.begin(), data.end());
+
+    auto max = data.back();
+
+    for (auto i = 0; i < 1000; ++i) {
+      v.append(max + i * 42 + 1);
+    }
+
+    for (auto i = 0; i < 1000; ++i) {
+      REQUIRE(v[data.size() + i] == (max + i * 42 + 1));
+    }
+  }
+}
+
+
 TEMPLATE_TEST_CASE_SIG("Serialize", "", TEMPLATE_ARGS) {
     auto data = generate_unique<T>(100000);
     std::string tmp = std::tmpnam(nullptr);
@@ -79,3 +99,4 @@ TEMPLATE_TEST_CASE_SIG("Serialize", "", TEMPLATE_ARGS) {
 
     std::remove(tmp.c_str());
 }
+

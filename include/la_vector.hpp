@@ -15,12 +15,15 @@
 
 #pragma once
 
+#include <cstdint>
 #include <limits>
 #include <cstdlib>
 #include <climits>
 #include <iostream>
 #include <sdsl/bits.hpp>
 #include <sdsl/int_vector.hpp>
+#include <type_traits>
+#include <utility>
 #include "piecewise_linear_model.hpp"
 
 /** Computes (bits_per_correction > 0 ? 2^(bits_per_correction-1) - 1 : 0) without the conditional operator. */
@@ -59,7 +62,8 @@ class la_vector {
     using larger_signed_key_type = typename std::conditional_t<sizeof(K) <= 4, int64_t, __int128>;
     using top_level_type = t_top_level<K, typename std::vector<segment>::const_iterator>;
     using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
-    using base_segment_type = typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
+    using base_segment_type =
+        typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
 
     // If auto_bpc, each segment uses a different bit-size for the corrections, stored in segment::bpc. It also stores
     // segment::corrections_offset, which is the cumulative sum of the preceding segments' bpc values and is used as a
@@ -70,9 +74,12 @@ class la_vector {
     K front;                          ///< The first element in this container.
     K back;                           ///< The last element in this container.
     size_t n;                         ///< The number of elements in this container.
-    std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.
+    std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.mag
     sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
-    top_level_type top_level;         ///< The top level structure on the segments.
+  sdsl::int_vector<64> correction_samples; 
+    top_level_type top_level; ///< The top level structure on the segments.
+
+  size_t remaining_correction_space = 0; ///< Indicator that corrections have to be resized when element is appended.
 
 public:
 
@@ -83,11 +90,9 @@ public:
 
     explicit la_vector(std::vector<K> &data) : la_vector(data.begin(), data.end()) {};
 
-    template<class RandomIt>
+    template <class RandomIt>
     la_vector(RandomIt begin, RandomIt end)
-        : front(*begin),
-          back(*std::prev(end)),
-          n(std::distance(begin, end)),
+        : front(*begin), back(*std::prev(end)), n(std::distance(begin, end)),
           segments() {
         if (n == 0)
             return;
@@ -97,6 +102,8 @@ public:
         // Store segments and fill the corrections array
         segments.reserve(canonical_segments.size() + 1);
         corrections = decltype(corrections)(CEIL_UINT_DIV(bit_size, 64) + 1, 0);
+        correction_samples = decltype(correction_samples)(
+            CEIL_UINT_DIV(n, extraction_density) + 1, 0);
 
         size_t corrections_offset = 0;
         for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
@@ -104,8 +111,8 @@ public:
             auto j = std::next(it) != canonical_segments.end() ? std::next(it)->get_first_x() : n;
             uint8_t bpc = t_bpc;
             if constexpr (auto_bpc)
-                bpc = it->bpc;
-            segments.emplace_back(*it, bpc, corrections_offset, begin, n, i, j, corrections.data());
+              bpc = it->bpc;
+            segments.emplace_back(*it, bpc, corrections_offset, begin, i, j, corrections.data(), correction_samples.data());
             corrections_offset += bpc * (j - i);
         }
 
@@ -120,8 +127,48 @@ public:
      */
     K operator[](size_t i) const {
         assert(i < n);
-        return top_level.segment_for_position(i)->decompress(corrections.data(), n, i);
+        return top_level.segment_for_position(i)->decompress(corrections.data(), correction_samples.data(), n, i);
     }
+
+    /**
+     * Appends an element to the compressed vector.
+     * @param value Value of the element that is appended.
+     */
+  template <bool Enable = !auto_bpc,
+            typename std::enable_if_t<Enable, int> = 0>
+  void append(K value) {
+    assert(value > back);
+    back = value;
+
+    if (remaining_correction_space == 0) {
+      corrections.resize(corrections.size() + extraction_density);
+      correction_samples.resize(correction_samples.size() + 1);
+    }
+    segments.pop_back();
+    auto const first_x = segments.back().first;
+    std::vector<K> last_values;
+    for (size_type i = first_x; i < n; ++i) {
+      last_values.push_back(segments.back().decompress(
+                                                       corrections.data(), correction_samples.data(), n, i));
+    }
+    last_values.push_back(value);
+
+    auto [canonical_segments, bit_size] = make_segmentation(last_values.begin(), last_values.end(), first_x);
+
+    size_t corrections_offset = 0;
+    for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
+      auto i = it->get_first_x();
+      auto j = std::next(it) != canonical_segments.end()
+        ? std::next(it)->get_first_x()
+        : n + 1;
+      uint8_t bpc = t_bpc;
+      segments.emplace_back(*it, bpc, corrections_offset, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
+      corrections_offset += bpc * (j - i);
+    }
+    segments.emplace_back(++n); // extra segment to avoid bound checking in decode() and lower_bound()
+      
+    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n - 1, value, corrections.data(), correction_samples.data());     
+  }
 
     /**
      * Returns an iterator pointing to the first element that is not less than the given value.
@@ -143,14 +190,14 @@ public:
         auto lo = pos <= bound + s.first ? s.first : pos - bound;
         auto hi = std::min<position_type>(pos + bound + 1, t.first);
 
-        if (!auto_bpc) {
+        if constexpr (!auto_bpc) {
             // Binary search on the samples
             auto sample_lo = CEIL_UINT_DIV(lo, extraction_density);
             auto sample_hi = (hi - 1) / extraction_density + 1;
 
             while (sample_lo < sample_hi) {
                 size_t mid = sample_lo + (sample_hi - sample_lo) / 2;
-                if (s.decompress(corrections.data(), n, mid * extraction_density) < value) {
+                if (s.decompress(corrections.data(), correction_samples.data(), n, mid * extraction_density) < value) {
                     sample_lo = mid + 1;
                     lo = mid * extraction_density;
                 } else {
@@ -162,7 +209,7 @@ public:
             // Binary search on the compressed data
             while (lo < hi) {
                 auto mid = lo + (hi - lo) / 2;
-                if (s.decompress(corrections.data(), n, mid) < value)
+                if (s.decompress(corrections.data(), correction_samples.data(), n, mid) < value)
                     lo = mid + 1;
                 else
                     hi = mid;
@@ -173,16 +220,16 @@ public:
             return iterator(this, lo, it);
         }
 
-        auto val = s.decompress(corrections.data(), n, pos);
+        auto val = s.decompress(corrections.data(), correction_samples.data(), n, pos);
         auto search_forward = val <= value;
         constexpr auto linear_threshold = 2 * cache_line_bits / (auto_bpc ? 4 : t_bpc);
 
         if (hi - lo <= linear_threshold) {
             if (search_forward)
                 while (pos < t.first && val < value)
-                    val = s.decompress(corrections.data(), n, ++pos);
+                  val = s.decompress(corrections.data(), correction_samples.data(), n, ++pos);
             else
-                while (pos > s.first && s.decompress(corrections.data(), n, pos - 1) >= value)
+              while (pos > s.first && s.decompress(corrections.data(), correction_samples.data(), n, pos - 1) >= value)
                     --pos;
 
             if (pos == t.first)
@@ -192,8 +239,8 @@ public:
 
         lo = search_forward ? pos : lo;
         hi = search_forward ? hi : pos;
-        auto val_at_lo = search_forward ? val : s.decompress(corrections.data(), n, lo);
-        auto val_at_hi = search_forward ? s.decompress(corrections.data(), n, hi - 1) : val;
+        auto val_at_lo = search_forward ? val : s.decompress(corrections.data(), correction_samples.data(), n, lo);
+        auto val_at_hi = search_forward ? s.decompress(corrections.data(), correction_samples.data(), n, hi - 1) : val;
         auto count = hi - lo;
 
         if (hi == t.first and value > val_at_hi)
@@ -205,12 +252,12 @@ public:
             auto dy = count - 1;
             auto step = x * dy / dx;
             auto p = lo + step;
-            auto val_at_p = s.decompress(corrections.data(), n, p);
+            auto val_at_p = s.decompress(corrections.data(), correction_samples.data(), n, p);
 
             if (value > val_at_p) {
                 lo = p + 1;
                 count -= step + 1;
-                val_at_lo = s.decompress(corrections.data(), n, lo);
+                val_at_lo = s.decompress(corrections.data(), correction_samples.data(), n, lo);
                 if (val_at_lo >= value) {
                     if (lo == t.first)
                         return iterator(this, t.first, std::next(it));
@@ -223,7 +270,7 @@ public:
             }
         }
 
-        for (; lo < hi && s.decompress(corrections.data(), n, lo) < value; ++lo);
+        for (; lo < hi && s.decompress(corrections.data(), correction_samples.data(), n, lo) < value; ++lo);
 
         if (lo == t.first)
             return iterator(this, t.first, std::next(it));
@@ -265,7 +312,7 @@ public:
                 out[j] = ((j * significand) >> exponent) + intercept;
 
             for (size_t j = 0; j < covered; ++j)
-                out[j] += s.get_correction(corrections.data(), n, j + s.first);
+              out[j] += s.get_correction(corrections.data(), correction_samples.data(), n, j + s.first);
 
             out += covered;
         }
@@ -298,7 +345,7 @@ public:
      * @return the size in bytes of this container
      */
     size_t size_in_bytes() const {
-        return corrections.bit_size() / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
+        return corrections.bit_size() / CHAR_BIT + correction_samples.bit_size() / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
     }
 
     /**
@@ -336,6 +383,7 @@ public:
         written_bytes += sdsl::serialize_vector(segments, out, child, "segments");
         written_bytes += sdsl::serialize(top_level, out, child, "top_level");
         written_bytes += sdsl::serialize(corrections, out, child, "corrections");
+        written_bytes += sdsl::serialize(correction_samples, out, child, "correction_samples");
         sdsl::structure_tree::add_size(child, written_bytes);
         return written_bytes;
     }
@@ -354,6 +402,7 @@ public:
         sdsl::load_vector(segments, in);
         top_level.load(in, segments.begin(), std::prev(segments.end()));
         sdsl::load(corrections, in);
+        sdsl::load(correction_samples, in);
     }
 
 private:
@@ -364,14 +413,18 @@ private:
         canonical_segment_bpc(const canonical_segment &cs, uint8_t bpc) : canonical_segment(cs), bpc(bpc) {};
     };
 
-    template<typename RandomIt, bool Enable = !auto_bpc, typename std::enable_if_t<Enable, int> = 0>
-    static std::pair<std::vector<canonical_segment>, size_t> make_segmentation(RandomIt begin, RandomIt end) {
+    
+    template <typename RandomIt,  bool Enable = !auto_bpc,
+              typename std::enable_if_t<Enable, int> = 0>
+    static std::pair<std::vector<canonical_segment>, size_t>
+    make_segmentation(RandomIt begin, RandomIt end, position_type offset = 0) {        
         auto n = std::distance(begin, end);
         auto eps = BPC_TO_EPSILON(t_bpc);
         std::vector<canonical_segment> out;
         out.reserve(eps > 0 ? n / (eps * eps) : n / 8);
-        auto in_fun = [begin](auto i) { return std::pair<position_type, K>(i, begin[i]); };
+        auto in_fun = [begin, offset](auto i) { return std::pair<position_type, K>(i + offset, begin[i]); };
         auto out_fun = [&out](auto cs) { out.push_back(cs); };
+        
         make_segmentation_par(n, eps, in_fun, out_fun);
         return {out, n * t_bpc};
     }
@@ -477,7 +530,7 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
 
     template<typename RandomIt>
     segment(const canonical_segment &cs, uint8_t bpc, position_type corrections_offset,
-            RandomIt data, size_t n, size_t i, size_t j, uint64_t *corrections)
+            RandomIt data, size_t i, size_t j, uint64_t *corrections, uint64_t* correction_samples, position_type offset = 0)
         : base_segment_type(bpc, corrections_offset) {
         auto epsilon = BPC_TO_EPSILON(bpc);
         auto [cs_significand, cs_exponent, cs_intercept] = cs.get_fixed_point_segment(cs.get_first_x(), j - i + 1);
@@ -491,9 +544,9 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
         slope_significand = cs_significand;
 
         for (auto k = i; k < j; k++) {
-            auto error = data[k] - approximate(k);
+            auto error = data[k - offset] - approximate(k);
             auto correction = uint64_t(error + epsilon);
-            set_correction(corrections, n, k, correction);
+            set_correction(corrections, correction_samples, k, correction);
         }
     }
 
@@ -504,15 +557,18 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
           slope_exponent(0),
           slope_significand(0) {}
 
-    size_t get_correction_bit_offset(size_t n, size_t i) const {
+  template <typename CorrectionPtrType>
+  std::pair<size_t, CorrectionPtrType> get_correction_bit_offset(size_t i, CorrectionPtrType corrections, CorrectionPtrType correction_samples) const {
         if constexpr (auto_bpc)
-            return this->corrections_offset + (i - first) * this->bpc;
-        if (i % extraction_density == 0)
-            return this->bpc * (i / extraction_density);
-        return this->bpc * (i + n / extraction_density - i / extraction_density);
+          return { this->corrections_offset + (i - first) * this->bpc, corrections };
+        if (i % extraction_density == 0) {
+          return { this->bpc * (i / extraction_density), correction_samples };
+        }
+        return { this->bpc * (i - i / extraction_density), corrections };
     }
 
-    void set_correction(uint64_t *corrections, size_t n, size_t i, uint64_t value) {
+    void set_correction(uint64_t *corrections, uint64_t *correction_samples,
+                        size_t i, uint64_t value) {
         if (this->bpc == 0)
             return;
         if (BIT_WIDTH(value) > this->bpc)
@@ -520,13 +576,15 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
         if (i == first)
             this->first_correction = value;
 
-        auto idx = get_correction_bit_offset(n, i);
-        sdsl::bits::write_int(corrections + (idx >> 6), value, idx & 0x3F, this->bpc);
+        auto [idx, start_word] =
+            get_correction_bit_offset(i, corrections, correction_samples);
+        sdsl::bits::write_int(start_word + (idx >> 6), value, idx & 0x3F, this->bpc);
     }
 
-    K get_correction(const uint64_t *corrections, size_t n, size_t i) const {
-        auto idx = get_correction_bit_offset(n, i);
-        return sdsl::bits::read_int(corrections + (idx >> 6u), idx & 0x3F, this->bpc);
+  K get_correction(uint64_t const* corrections, uint64_t const* correction_samples, size_t n, size_t i) const {
+        auto [idx, start_word] =
+            get_correction_bit_offset(i, corrections, correction_samples);
+        return sdsl::bits::read_int(start_word + (idx >> 6u), idx & 0x3F, this->bpc);
     }
 
     larger_signed_key_type approximate(size_t i) const {
@@ -547,9 +605,9 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
         return intercept + correction - epsilon;
     }
 
-    K decompress(const uint64_t *corrections, size_t n, size_t i) const {
+  K decompress(uint64_t const* corrections, uint64_t const* correction_samples, size_t n, size_t i) const {
         auto epsilon = BPC_TO_EPSILON(this->bpc);
-        auto correction = get_correction(corrections, n, i);
+        auto correction = get_correction(corrections, correction_samples, n, i);
         return approximate(i) + correction - epsilon;
     }
 
@@ -565,12 +623,13 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 class la_vector<K, t_bpc, t_top_level>::la_iterator {
     using parent_type = const la_vector<K, t_bpc, t_top_level>;
-    using segments_iterator = typename decltype(parent_type::segments)::const_iterator;
+    using segments_iterator =
+        typename decltype(parent_type::segments)::const_iterator;
 
     parent_type *p;
     size_t i;
     segments_iterator s_it;
-
+  
     template<bool Forward = true>
     void move_segment_cursor() {
         bool is_segment_cursor_invalid = s_it == p->segments.end();
@@ -596,10 +655,10 @@ public:
     using iterator_category = std::random_access_iterator_tag;
 
     la_iterator() : p(nullptr), i(0), s_it(p->segments.begin()) {}
-    la_iterator(parent_type *p, size_t i, segments_iterator s_it) : p(p), i(i), s_it(s_it) {}
+  la_iterator(parent_type *p, size_t i, segments_iterator s_it) : p(p), i(i), s_it(s_it) {}
     la_iterator(parent_type *p, size_t i) : p(p), i(i), s_it(p->segments.end()) { move_segment_cursor<>(); }
 
-    reference operator*() const { return s_it->decompress(p->corrections.data(), p->n, i); }
+  reference operator*() const { return s_it->decompress(p->corrections.data(), p->correction_samples.data(), p->n, i); }
     reference operator[](difference_type m) const { return (*p)[i + m]; }
 
     la_iterator &operator++() {
@@ -689,7 +748,7 @@ public:
         auto n_segments = (size_t) std::distance(first_segment, last_segment);
         auto n = std::distance(first, last);
         auto u = *std::prev(last);
-
+        
         segments_begin = first_segment;
         top_level_size = std::min(1u << 16, BIT_CEIL(n_segments));
         val_step = CEIL_UINT_DIV(u, top_level_size);
@@ -705,6 +764,30 @@ public:
             val_top_level[i] = j;
             pos_top_level[i] = k;
         }
+    }
+
+    bucketing_top_level(t_segments_iterator first_segment,
+                        t_segments_iterator last_segment, size_t n,
+                        size_t max_value,
+                        uint64_t* corrections, uint64_t* correction_samples) {
+        auto n_segments = (size_t)std::distance(first_segment, last_segment);
+        
+        segments_begin = first_segment;
+        top_level_size = std::min(1u << 16, BIT_CEIL(n_segments));
+        val_step = CEIL_UINT_DIV(max_value, top_level_size);
+        pos_step = CEIL_UINT_DIV(n, top_level_size);
+        val_top_level = sdsl::int_vector<>(top_level_size + 1, n_segments, BIT_WIDTH(n_segments));
+        pos_top_level = sdsl::int_vector<>(top_level_size + 1, n_segments, BIT_WIDTH(n_segments));
+
+        for (size_t i = 0, j = 0, k = 0; i < top_level_size - 1; ++i) {
+          while (j < n_segments && first_segment[j].decompress(corrections, correction_samples, n, first_segment[j].first) < (i + 1) * val_step)
+                ++j;
+            while (k < n_segments && first_segment[k].first < (i + 1) * pos_step)
+                ++k;
+            val_top_level[i] = j;
+            pos_top_level[i] = k;
+        }
+
     }
 
     /**

@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <memory>
+#include <cstddef>
 #ifdef _OPENMP
 #include <omp.h>
 #else
@@ -23,6 +25,7 @@ typedef int omp_int_t;
 inline omp_int_t omp_get_max_threads() { return 1; }
 #endif
 
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -96,6 +99,8 @@ private:
         size_t size() const { return std::vector<StoredPoint>::size(); }
         void push(X x, Y y) { std::vector<StoredPoint>::emplace_back(StoredPoint{x, y}); };
     };
+
+    
 
     const Y epsilon;
     Hull<false> lower;
