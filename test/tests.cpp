@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 #include "catch.hpp"
@@ -57,7 +58,7 @@ TEMPLATE_TEST_CASE_SIG("Rank", "", TEMPLATE_ARGS) {
 }
 
 
-TEMPLATE_TEST_CASE_SIG("Append", "", TEMPLATE_ARGS) {
+TEMPLATE_TEST_CASE_SIG("Append Single", "", TEMPLATE_ARGS) {
   if constexpr (B > 0) {
     auto data = generate_unique<T>(100000);
 
@@ -75,6 +76,31 @@ TEMPLATE_TEST_CASE_SIG("Append", "", TEMPLATE_ARGS) {
   }
 }
 
+TEMPLATE_TEST_CASE_SIG("Append Multiple", "", TEMPLATE_ARGS) {
+  if constexpr (B > 0) {
+    auto data = generate_unique<T>(100000);
+
+    la_vector<T, B> v(data.begin(), data.end());
+    auto max = data.back();
+    size_t prev_inserted_size = data.size();
+    
+    for (size_t i = 0; i < 100; ++i) {
+      std::vector<T> to_append;
+
+      for (auto i = 0; i < 1000; ++i) {
+        to_append.push_back(max + 1 + (std::rand() % 5000));
+        max = to_append.back();
+      }
+
+      v.append(to_append.begin(), to_append.end());
+
+      for (auto i = 0; i < to_append.size(); ++i) {
+        CHECK(v[prev_inserted_size + i] == to_append[i]);
+      }
+      prev_inserted_size += to_append.size();
+    }
+  }
+}
 
 TEMPLATE_TEST_CASE_SIG("Serialize", "", TEMPLATE_ARGS) {
     auto data = generate_unique<T>(100000);

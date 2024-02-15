@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <bits/iterator_concepts.h>
 #include <cstdint>
 #include <limits>
 #include <cstdlib>
@@ -137,9 +138,18 @@ public:
   template <bool Enable = !auto_bpc,
             typename std::enable_if_t<Enable, int> = 0>
   void append(K value) {
-    assert(value > back);
-    back = value;
+        assert(value > back);
+        std::array<K, 1> buffer = {value};
+        append(buffer.begin(), buffer.end());
+  }
 
+  void append(std::random_access_iterator auto begin,
+              std::random_access_iterator auto end) {
+    assert(std::is_sorted(begin, end));
+    assert(*begin > back);
+    
+    back = *std::prev(end);
+    
     if (remaining_correction_space == 0) {
       corrections.resize(corrections.size() + extraction_density);
       correction_samples.resize(correction_samples.size() + 1);
@@ -151,7 +161,7 @@ public:
       last_values.push_back(segments.back().decompress(
                                                        corrections.data(), correction_samples.data(), n, i));
     }
-    last_values.push_back(value);
+    last_values.insert(last_values.end(), begin, end);
 
     auto [canonical_segments, bit_size] = make_segmentation(last_values.begin(), last_values.end(), first_x);
 
@@ -160,14 +170,15 @@ public:
       auto i = it->get_first_x();
       auto j = std::next(it) != canonical_segments.end()
         ? std::next(it)->get_first_x()
-        : n + 1;
+        : n + std::distance(begin, end);
       uint8_t bpc = t_bpc;
       segments.emplace_back(*it, bpc, corrections_offset, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
       corrections_offset += bpc * (j - i);
     }
-    segments.emplace_back(++n); // extra segment to avoid bound checking in decode() and lower_bound()
+    n += std::distance(begin , end);
+    segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
       
-    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n - 1, value, corrections.data(), correction_samples.data());     
+    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n - 1, back, corrections.data(), correction_samples.data());
   }
 
     /**
