@@ -72,9 +72,9 @@ class la_vector {
     // If !auto_bpc, the corrections array is split into two parts. The first part contains the corrections at positions
     // multiples of extraction_density. The second part contains the remaining corrections.
 
-    K front;                          ///< The first element in this container.
-    K back;                           ///< The last element in this container.
-    size_t n;                         ///< The number of elements in this container.
+  K front = K{0};                          ///< The first element in this container.
+  K back = K{0};                           ///< The last element in this container.
+  size_t n = size_t{0};                         ///< The number of elements in this container.
     std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.mag
     sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
   sdsl::int_vector<64> correction_samples; 
@@ -146,16 +146,17 @@ public:
   void append(std::random_access_iterator auto begin,
               std::random_access_iterator auto end) {
     assert(std::is_sorted(begin, end));
-    assert(*begin > back);
-    
+    assert(back == 0 || *begin > back);
+
     back = *std::prev(end);
     
     if (remaining_correction_space == 0) {
       corrections.resize(corrections.size() + extraction_density);
       correction_samples.resize(correction_samples.size() + 1);
     }
-    segments.pop_back();
-    auto const first_x = segments.back().first;
+    if (!segments.empty())
+      segments.pop_back();
+    auto const first_x = segments.empty() ? 0 : segments.back().first;
     std::vector<K> last_values;
     for (size_type i = first_x; i < n; ++i) {
       last_values.push_back(segments.back().decompress(
@@ -164,21 +165,19 @@ public:
     last_values.insert(last_values.end(), begin, end);
 
     auto [canonical_segments, bit_size] = make_segmentation(last_values.begin(), last_values.end(), first_x);
-
-    size_t corrections_offset = 0;
+    
     for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
       auto i = it->get_first_x();
       auto j = std::next(it) != canonical_segments.end()
         ? std::next(it)->get_first_x()
         : n + std::distance(begin, end);
       uint8_t bpc = t_bpc;
-      segments.emplace_back(*it, bpc, corrections_offset, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
-      corrections_offset += bpc * (j - i);
+      segments.emplace_back(*it, bpc, 0, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
     }
-    n += std::distance(begin , end);
+    n += std::distance(begin , end) - 1;
     segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
-      
-    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n - 1, back, corrections.data(), correction_samples.data());
+    
+    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n, back, corrections.data(), correction_samples.data());
   }
 
     /**
