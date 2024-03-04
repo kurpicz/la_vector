@@ -80,7 +80,7 @@ class la_vector {
   sdsl::int_vector<64> correction_samples; 
     top_level_type top_level; ///< The top level structure on the segments.
 
-  size_t remaining_correction_space = 0; ///< Indicator that corrections have to be resized when element is appended.
+  size_t remaining_correction_space = size_t{0}; ///< Indicator that corrections have to be resized when element is appended.
 
 public:
 
@@ -153,7 +153,9 @@ public:
     if (remaining_correction_space == 0) {
       corrections.resize(corrections.size() + extraction_density);
       correction_samples.resize(correction_samples.size() + 1);
+      remaining_correction_space = extraction_density;
     }
+    --remaining_correction_space;
     if (!segments.empty())
       segments.pop_back();
     auto const first_x = segments.empty() ? 0 : segments.back().first;
@@ -164,20 +166,23 @@ public:
     }
     last_values.insert(last_values.end(), begin, end);
 
+    if (!segments.empty())
+      segments.pop_back();
+
     auto [canonical_segments, bit_size] = make_segmentation(last_values.begin(), last_values.end(), first_x);
     
     for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
       auto i = it->get_first_x();
-      auto j = std::next(it) != canonical_segments.end()
-        ? std::next(it)->get_first_x()
-        : n + std::distance(begin, end);
+      auto j = std::next(it) != canonical_segments.end() ?
+                   std::next(it)->get_first_x() :
+                   n + std::distance(begin, end);
       uint8_t bpc = t_bpc;
       segments.emplace_back(*it, bpc, 0, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
     }
-    n += std::distance(begin , end) - 1;
+    n += std::distance(begin , end);
     segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
     
-    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n, back, corrections.data(), correction_samples.data());
+    top_level = decltype(top_level)(segments.begin(), segments.end(), n, back, corrections.data(), correction_samples.data());
   }
 
     /**
@@ -191,9 +196,10 @@ public:
         if (value <= front)
             return begin();
 
-        auto it = top_level.segment_for_value(value);
+        auto it = top_level.segment_for_value(value);        
         auto &s = *it;
-        auto &t = *std::next(it);
+        auto& t = *std::next(it);
+        
         auto [pos, bound] = s.approximate_position(value);
         pos = std::clamp<position_type>(pos, s.first, t.first - 1);
 
@@ -292,7 +298,9 @@ public:
      * @param value value to compare elements to
      * @return the number of elements that are less than or equal to @p value
      */
-    size_t rank(K value) const { return std::distance(begin(), lower_bound(value)); }
+    size_t rank(K value) const {
+      return std::distance(begin(), lower_bound(value));
+    }
 
     /**
      * Returns the i-th smallest element in the container.
@@ -823,8 +831,8 @@ public:
         auto k = value / val_step;
         auto first = segments_begin + (value < val_step ? 0 : val_top_level[k - 1]);
         auto last = segments_begin + val_top_level[k];
-        auto cmp = [](K x, const auto &s) { return x < s.first_key(); };
-        auto it = upper_bound_branchless(first, last, value, cmp);
+        auto cmp = [](K x, const auto& s) { return x < s.first_key(); };
+        auto it = upper_bound_branchless(first, last, value, cmp);        
         return it == segments_begin ? it : std::prev(it);
     }
 
