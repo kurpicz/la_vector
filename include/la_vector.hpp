@@ -76,7 +76,7 @@ class la_vector {
   K back = K{0};                           ///< The last element in this container.
   size_t n = size_t{0};                         ///< The number of elements in this container.
     std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.mag
-    sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
+  sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
   sdsl::int_vector<64> correction_samples; 
     top_level_type top_level; ///< The top level structure on the segments.
 
@@ -87,7 +87,10 @@ public:
     using size_type = size_t;
     using iterator = class la_iterator;
 
-    la_vector() = default;
+  la_vector(){
+        corrections = decltype(corrections)(512, 0);
+        correction_samples = decltype(correction_samples)(32, 0);
+  }
 
     explicit la_vector(std::vector<K> &data) : la_vector(data.begin(), data.end()) {};
 
@@ -143,19 +146,22 @@ public:
         append(buffer.begin(), buffer.end());
   }
 
+  template <bool Enable = !auto_bpc,
+            typename std::enable_if_t<Enable, int> = 0>
   void append(std::random_access_iterator auto begin,
               std::random_access_iterator auto end) {
     assert(std::is_sorted(begin, end));
     assert(back == 0 || *begin > back);
-
+    
     back = *std::prev(end);
     
-    if (remaining_correction_space == 0) {
-      corrections.resize(corrections.size() + extraction_density);
-      correction_samples.resize(correction_samples.size() + 1);
-      remaining_correction_space = extraction_density;
+    if (auto required_bits = std::distance(begin, end) * t_bpc;
+        remaining_correction_space <= required_bits) {
+      corrections.resize(corrections.size() + CEIL_UINT_DIV(std::distance(begin, end) * t_bpc, 64));
+      correction_samples.resize(correction_samples.size() + std::max<size_t>(1, CEIL_UINT_DIV(std::distance(begin, end) * t_bpc, 64)/extraction_density));
+    } else {
+      remaining_correction_space -= required_bits;
     }
-    --remaining_correction_space;
     if (!segments.empty())
       segments.pop_back();
     auto const first_x = segments.empty() ? 0 : segments.back().first;
