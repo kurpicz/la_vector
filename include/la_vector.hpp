@@ -188,7 +188,7 @@ public:
     n += std::distance(begin , end);
     segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
     
-    top_level = decltype(top_level)(segments.begin(), segments.end(), n, back, corrections.data(), correction_samples.data());
+    top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n, back, corrections.data(), correction_samples.data());
   }
 
     /**
