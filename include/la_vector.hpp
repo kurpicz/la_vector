@@ -42,7 +42,7 @@
 template<typename K, typename t_segments_iterator>
 class bucketing_top_level;
 
-template<typename K, uint8_t t_bpc = 0, template<class, class> class t_top_level = bucketing_top_level>
+template<typename K, uint8_t t_bpc = 0, bool enable_buffer = true,  template<class, class> class t_top_level = bucketing_top_level>
 class la_vector {
     static_assert(std::is_integral_v<K>);
     static_assert(std::is_unsigned_v<K>);
@@ -80,6 +80,8 @@ class la_vector {
   sdsl::int_vector<64> correction_samples; 
     top_level_type top_level; ///< The top level structure on the segments.
 
+  std::vector<K> buffer_; 
+  
   size_t remaining_correction_space = size_t{0}; ///< Indicator that corrections have to be resized when element is appended.
 
 public:
@@ -112,12 +114,19 @@ public:
         size_t corrections_offset = 0;
         for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
             auto i = it->get_first_x();
-            auto j = std::next(it) != canonical_segments.end() ? std::next(it)->get_first_x() : n;
+            auto j = std::next(it) != canonical_segments.end() ?
+                         std::next(it)->get_first_x() :
+                         n;
             uint8_t bpc = t_bpc;
             if constexpr (auto_bpc)
               bpc = it->bpc;
             segments.emplace_back(*it, bpc, corrections_offset, begin, i, j, corrections.data(), correction_samples.data());
             corrections_offset += bpc * (j - i);
+        }
+
+        if constexpr (enable_buffer) {
+          auto const last_segment = canonical_segments.back();
+          buffer_ = std::vector<K>(begin + last_segment.get_first_x(), end);
         }
 
         segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
@@ -165,17 +174,20 @@ public:
     if (!segments.empty())
       segments.pop_back();
     auto const first_x = segments.empty() ? 0 : segments.back().first;
-    std::vector<K> last_values;
-    for (size_type i = first_x; i < n; ++i) {
-      last_values.push_back(segments.back().decompress(
-                                                       corrections.data(), correction_samples.data(), n, i));
-    }
-    last_values.insert(last_values.end(), begin, end);
 
+    if constexpr (!enable_buffer) {
+      for (size_type i = first_x; i < n; ++i) {
+        buffer_.push_back(segments.back().decompress(
+                                                         corrections.data(), correction_samples.data(), n, i));
+      }
+    }
+
+    buffer_.insert(buffer_.end(), begin, end);
+    
     if (!segments.empty())
       segments.pop_back();
 
-    auto [canonical_segments, bit_size] = make_segmentation(last_values.begin(), last_values.end(), first_x);
+    auto [canonical_segments, bit_size] = make_segmentation(buffer_.begin(), buffer_.end(), first_x);
     
     for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
       auto i = it->get_first_x();
@@ -183,11 +195,17 @@ public:
                    std::next(it)->get_first_x() :
                    n + std::distance(begin, end);
       uint8_t bpc = t_bpc;
-      segments.emplace_back(*it, bpc, 0, last_values.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
+      segments.emplace_back(*it, bpc, 0, buffer_.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
     }
     n += std::distance(begin , end);
     segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
-    
+
+    if constexpr (enable_buffer) {
+      auto const last_segment = canonical_segments.back();
+      buffer_ = std::vector<K>(begin + last_segment.get_first_x() - first_x, end);
+    } else {
+      buffer_.clear();
+    }
     top_level = decltype(top_level)(segments.begin(), std::prev(segments.end()), n, back, corrections.data(), correction_samples.data());
   }
 
@@ -523,16 +541,16 @@ private:
 
 #pragma pack(push, 1)
 
-template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
-struct la_vector<K, t_bpc, t_top_level>::constant_bpc {
+template<typename K, uint8_t t_bpc, bool enable_buffer, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, enable_buffer, t_top_level>::constant_bpc {
     static constexpr uint8_t bpc = t_bpc;
     uint32_t first_correction: t_bpc;
     constant_bpc() = default;
     constant_bpc(uint8_t, position_type) : first_correction(0) {};
 };
 
-template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
-struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
+template<typename K, uint8_t t_bpc, bool enable_buffer, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, enable_buffer, t_top_level>::variable_bpc {
     uint8_t bpc;
     uint32_t corrections_offset;
     uint32_t first_correction: 16;
@@ -540,8 +558,8 @@ struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
     variable_bpc(uint8_t bpc, position_type offset) : bpc(bpc), corrections_offset(offset), first_correction(0) {};
 };
 
-template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
-struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
+template<typename K, uint8_t t_bpc, bool enable_buffer, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, enable_buffer, t_top_level>::segment : base_segment_type {
     using size_type = size_t;
     static constexpr auto exponent_bits = 5;
     static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 64 - exponent_bits;
@@ -644,9 +662,9 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
 
 #pragma pack(pop)
 
-template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
-class la_vector<K, t_bpc, t_top_level>::la_iterator {
-    using parent_type = const la_vector<K, t_bpc, t_top_level>;
+template<typename K, uint8_t t_bpc, bool enable_buffer, template<class, class> class t_top_level>
+class la_vector<K, t_bpc, enable_buffer, t_top_level>::la_iterator {
+  using parent_type = const la_vector<K, t_bpc, enable_buffer, t_top_level>;
     using segments_iterator =
         typename decltype(parent_type::segments)::const_iterator;
 
@@ -882,4 +900,4 @@ public:
 };
 
 template<typename K, template<class, class> class t_top_level = bucketing_top_level>
-using la_vector_opt = la_vector<K, 0, t_top_level>;
+using la_vector_opt = la_vector<K, 0, false, t_top_level>;
