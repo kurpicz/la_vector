@@ -188,12 +188,14 @@ public:
       segments.pop_back();
 
     auto [canonical_segments, bit_size] = make_segmentation(buffer_.begin(), buffer_.end(), first_x);
-    
+
+    size_t last_size = 0;
     for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
       auto i = it->get_first_x();
       auto j = std::next(it) != canonical_segments.end() ?
                    std::next(it)->get_first_x() :
                    n + std::distance(begin, end);
+      last_size = j - i;
       uint8_t bpc = t_bpc;
       segments.emplace_back(*it, bpc, 0, buffer_.begin(), i, j, corrections.data(), correction_samples.data(), first_x);
     }
@@ -201,8 +203,7 @@ public:
     segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
 
     if constexpr (enable_buffer) {
-      auto const last_segment = canonical_segments.back();
-      buffer_ = std::vector<K>(begin + last_segment.get_first_x() - first_x, end);
+      buffer_ = std::vector<K>(std::prev(buffer_.end(), last_size), buffer_.end());
     } else {
       buffer_.clear();
     }
